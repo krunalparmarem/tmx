@@ -20,7 +20,7 @@ Managing multiple autonomous AI agents (like Claude Code, OpenDevin, Aider) in t
 You can install `tmx` via our installation script:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/krunalparmar/tmx/main/install.sh | bash
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/krunalparmarem/tmx/main/install.sh | bash
 ```
 
 *Note: Requires `tmux` and `cargo`/`rust` to be installed on your system.*

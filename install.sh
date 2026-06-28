@@ -17,7 +17,7 @@ if ! command -v tmux &> /dev/null; then
 fi
 
 echo "📦 Compiling and installing from source..."
-cargo install --git https://github.com/krunalparmar/tmx.git --force
+cargo install --git https://github.com/krunalparmarem/tmx.git --force
 
 echo "✅ Installation complete!"
 echo "Run 'tmx' in your terminal to begin the setup!"
