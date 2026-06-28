@@ -52,7 +52,7 @@ fn read_prefix_key() -> String {
     println!("   (Note: The 'Command' key is intercepted by macOS. Please use Ctrl, Option/Alt, or a Function key.)\n");
     
     enable_raw_mode().unwrap();
-    let mut tmux_key = String::new();
+    let tmux_key;
     
     loop {
         if let Ok(Event::Key(event)) = read() {
@@ -262,10 +262,6 @@ fn run_switch(config_path: &str) {
     }
 }
 
-fn run_attach(config_path: &str) {
-    run_switch(config_path); // Effectively the same behavior now
-}
-
 fn run_kill() {
     let sessions = get_sessions();
     if sessions.is_empty() {
@@ -418,7 +414,7 @@ fn run_config(mut cfg: AppConfig, config_dir: &PathBuf) -> AppConfig {
     cfg
 }
 
-fn interactive_menu(config_path: &str, mut cfg: AppConfig, config_dir: &PathBuf) {
+fn interactive_menu(config_path: &str, cfg: AppConfig, config_dir: &PathBuf) {
     let options = vec!["Create Agent Workspace", "Switch / Attach to Session", "Global Dashboard (ps)", "Change Configuration", "Kill Session", "Cheatsheet", "Exit"];
     let selection = Select::with_theme(&ColorfulTheme::default()).with_prompt("What would you like to do?").default(0).items(&options).interact().unwrap();
     match selection {
@@ -442,7 +438,7 @@ fn main() {
 
     let home = std::env::var("HOME").expect("HOME not set");
     let config_dir = PathBuf::from(&home).join(".config").join("tmx");
-    let mut cfg = load_config();
+    let cfg = load_config();
     let config_path = setup_tmx_conf(&cfg.prefix);
     let cli = Cli::parse();
     
