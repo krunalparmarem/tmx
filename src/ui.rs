@@ -351,7 +351,7 @@ pub fn ansi_bg_fill_shell(hex: &str) -> String {
     format!("printf '\\033[48;2;{r};{g};{b}m\\033[2J\\033[H'")
 }
 
-pub fn window_color_script_body() -> String {
+pub fn window_color_script_body(paint_panes: bool) -> String {
     let mut script = String::from(
         "idx=$(tmux display -p '#{window_index}' 2>/dev/null) || exit 0\n\
          case $((idx % ",
@@ -365,42 +365,51 @@ pub fn window_color_script_body() -> String {
         "esac\n\
          wid=$(tmux display -p '#{window_id}')\n\
          swarm=$(tmux show-options -wv -t \"$wid\" @swarm_panes 2>/dev/null || echo false)\n\
+         swarm=$(printf '%s' \"$swarm\" | tr -d '[:space:]')\n\
          tmux set-window-option -t \"$wid\" @tab_color \"$c\" 2>/dev/null\n\
-         tmux set-window-option -t \"$wid\" window-style \"bg=$c\" 2>/dev/null\n\
-         if [ \"$swarm\" != \"true\" ]; then\n\
-           r=$((16#${c:1:2})); g=$((16#${c:3:2})); b=$((16#${c:5:2}))\n\
-           tmux list-panes -t \"$wid\" -F '#{pane_id}' 2>/dev/null | while IFS= read -r pid; do\n\
-             [ -n \"$pid\" ] || continue\n\
-             tmux select-pane -t \"$pid\" -P \"bg=$c,border=fg=$c\" 2>/dev/null\n\
-             script=\"${TMPDIR:-/tmp}/tmx-fill-${pid}.sh\"\n\
-             printf '%s\\n' '#!/bin/sh' \"printf '\\\\033[48;2;${r};${g};${b}m\\\\033[2J\\\\033[H'\" 'rm -f \"$0\"' > \"$script\"\n\
-             chmod +x \"$script\"\n\
-             tmux send-keys -t \"$pid\" \"sh '$script'\" C-m\n\
-           done\n\
-         fi\n",
+         tmux set-window-option -t \"$wid\" window-style \"bg=$c\" 2>/dev/null\n",
     );
+    if paint_panes {
+        script.push_str(
+            "if [ \"$swarm\" = \"true\" ]; then\n\
+               exit 0\n\
+             fi\n\
+             r=$((16#${c:1:2})); g=$((16#${c:3:2})); b=$((16#${c:5:2}))\n\
+             tmux list-panes -t \"$wid\" -F '#{pane_id}' 2>/dev/null | while IFS= read -r pid; do\n\
+               [ -n \"$pid\" ] || continue\n\
+               tmux select-pane -t \"$pid\" -P \"bg=$c,border=fg=$c\" 2>/dev/null\n\
+               script=\"${TMPDIR:-/tmp}/tmx-fill-${pid}.sh\"\n\
+               printf '%s\\n' '#!/bin/sh' \"printf '\\\\033[48;2;${r};${g};${b}m\\\\033[2J\\\\033[H'\" 'rm -f \\\"$0\\\"' > \\\"$script\\\"\n\
+               chmod +x \"$script\"\n\
+               tmux send-keys -t \"$pid\" \"sh '$script'\" C-m\n\
+             done\n",
+        );
+    }
     script
 }
 
-/// Shell one-liner: paint bg, optional fastfetch/neofetch, then colored ASCII splash.
-pub fn swarm_pane_splash_command(index: usize) -> String {
+/// Multi-line shell script: paint bg, optional fastfetch/neofetch, then colored ASCII splash.
+pub fn swarm_pane_splash_script(index: usize) -> String {
     let style = &SWARM_PANES[index.min(3)];
-    let mut cmd = ansi_bg_fill_shell(style.bg);
-    cmd.push_str(";command -v fastfetch>/dev/null 2>&1&&fastfetch -l small 2>/dev/null|head -14;");
-    cmd.push_str(
-        "command -v neofetch>/dev/null 2>&1&&neofetch --ascii_distro auto 2>/dev/null|head -14;",
+    let mut lines = vec![ansi_bg_fill_shell(style.bg)];
+    lines.push(
+        "command -v fastfetch>/dev/null 2>&1&&fastfetch -l small 2>/dev/null|head -14".to_string(),
     );
-    cmd.push_str(&format!("printf '\\n\\033[1;38;5;{}m\\n';", style.accent));
+    lines.push(
+        "command -v neofetch>/dev/null 2>&1&&neofetch --ascii_distro auto 2>/dev/null|head -14"
+            .to_string(),
+    );
+    lines.push(format!("printf '\\n\\033[1;38;5;{}m\\n'", style.accent));
     for line in style.art {
         let escaped = line.replace('\'', "'\\''");
-        cmd.push_str(&format!("printf '%s\\n' '{escaped}';"));
+        lines.push(format!("printf '%s\\n' '{escaped}'"));
     }
     let (r, g, b) = hex_to_rgb(style.bg);
-    cmd.push_str(&format!(
-        "printf '\\033[48;2;{r};{g};{b}m\\033[38;5;252m\\n\\n  🤖 AGENT {} — standing by\\n\\n';",
+    lines.push(format!(
+        "printf '\\033[48;2;{r};{g};{b}m\\033[38;5;252m\\n\\n  🤖 AGENT {} — standing by\\n\\n'",
         style.codename
     ));
-    cmd
+    lines.join("\n")
 }
 
 pub fn swarm_pane_bg(index: usize) -> &'static str {

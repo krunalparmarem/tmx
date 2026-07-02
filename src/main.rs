@@ -22,7 +22,7 @@ use ui::{
     print_dashboard_header, print_dashboard_stats, print_doctor_banner, print_goodbye,
     print_layout_preview, print_review_banner, print_setup_banner, print_swarm_banner,
     print_switch_banner, review_agent_card, section, section_end, session_created, session_killed,
-    spawn_ritual, success, swarm_pane_bg, swarm_pane_splash_command, warn,
+    spawn_ritual, success, swarm_pane_bg, swarm_pane_splash_script, warn,
     window_color_script_body,
 };
 
@@ -655,7 +655,7 @@ fn style_window_tab(
 
 fn write_window_color_script(dir: &Path) -> Result<String, String> {
     let path = dir.join("tmx-window-color.sh");
-    let script = format!("#!/bin/sh\n{}", window_color_script_body());
+    let script = format!("#!/bin/sh\n{}", window_color_script_body(true));
     fs::write(&path, script).map_err(|e| format!("failed to write window color script: {e}"))?;
     #[cfg(unix)]
     {
@@ -666,16 +666,31 @@ fn write_window_color_script(dir: &Path) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+fn write_window_color_select_script(dir: &Path) -> Result<String, String> {
+    let path = dir.join("tmx-window-color-select.sh");
+    let script = format!("#!/bin/sh\n{}", window_color_script_body(false));
+    fs::write(&path, script).map_err(|e| format!("failed to write window color select script: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("failed to chmod window color select script: {e}"))?;
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
 fn render_tmx_conf(cfg: &AppConfig) -> Result<String, String> {
     let dir = config_dir()?;
     let color_script = write_window_color_script(&dir)?;
+    let color_select_script = write_window_color_select_script(&dir)?;
     let config_path = dir.join("tmx.conf");
     let conf_content = TMX_CONF
         .replace("{{PREFIX}}", &cfg.prefix)
         .replace("{{TMX_BIN}}", &tmx_bin())
         .replace("{{SHELL}}", &shell_cmd())
         .replace("{{CLIPBOARD_CMD}}", &clipboard_cmd())
-        .replace("{{WINDOW_COLOR_SCRIPT}}", &color_script);
+        .replace("{{WINDOW_COLOR_SCRIPT}}", &color_script)
+        .replace("{{WINDOW_COLOR_SELECT_SCRIPT}}", &color_select_script);
     fs::write(&config_path, &conf_content).map_err(|e| format!("failed to write tmx.conf: {e}"))?;
     Ok(config_path.to_string_lossy().to_string())
 }
@@ -795,6 +810,17 @@ fn send_cmd(pane: &str, cmd: &str) -> Result<(), String> {
     tmux(&["send-keys", "-t", pane, "C-m"])
 }
 
+fn pane_script_id(pane: &str) -> String {
+    pane.chars()
+        .map(|c| match c {
+            '%' => 'p',
+            ':' | '.' | '/' | '\\' => '_',
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
 /// Run a multi-statement shell script in a pane via a temp file (avoids paste races / line limits).
 fn run_pane_script(pane: &str, script: &str) -> Result<(), String> {
     let body = script.trim().trim_end_matches(';').trim();
@@ -803,8 +829,7 @@ fn run_pane_script(pane: &str, script: &str) -> Result<(), String> {
     }
     let dir = config_dir()?.join("pane-scripts");
     fs::create_dir_all(&dir).map_err(|e| format!("failed to create pane-scripts dir: {e}"))?;
-    let safe_id = pane.replace('%', "p");
-    let path = dir.join(format!("{safe_id}.sh"));
+    let path = dir.join(format!("{}.sh", pane_script_id(pane)));
     let content = format!("#!/bin/sh\n{body}\nrm -f \"$0\"\n");
     fs::write(&path, &content).map_err(|e| format!("failed to write pane script: {e}"))?;
     #[cfg(unix)]
@@ -813,6 +838,8 @@ fn run_pane_script(pane: &str, script: &str) -> Result<(), String> {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
             .map_err(|e| format!("failed to chmod pane script: {e}"))?;
     }
+    // Drop any partial paste left by async tmux hooks before we run setup.
+    tmux(&["send-keys", "-t", pane, "C-c"])?;
     send_cmd(pane, &format!("sh {}", shell_quote_single(&path.to_string_lossy())))
 }
 
@@ -843,7 +870,7 @@ fn setup_pane(
     let mut script = splash_cmd.trim_end().trim_end_matches(';').to_string();
     let extra = env_cmd.trim();
     if !extra.is_empty() {
-        script.push(';');
+        script.push('\n');
         script.push_str(extra);
     }
     run_pane_script(pane, &script)
@@ -855,9 +882,23 @@ fn setup_swarm_pane(pane: &str, index: usize, env_cmd: &str) -> Result<(), Strin
         pane,
         codename,
         swarm_pane_bg(index),
-        &swarm_pane_splash_command(index),
+        &swarm_pane_splash_script(index),
         env_cmd,
     )
+}
+
+fn list_window_pane_ids(session: &str, window: u32) -> Result<Vec<String>, String> {
+    let target = format!("{session}:{window}");
+    let out = tmux_output(&["list-panes", "-t", &target, "-F", "#{pane_index}|#{pane_id}"])?;
+    let mut panes: Vec<(u32, String)> = out
+        .lines()
+        .filter_map(|line| {
+            let (idx, pid) = line.split_once('|')?;
+            Some((idx.parse().ok()?, pid.to_string()))
+        })
+        .collect();
+    panes.sort_by_key(|(idx, _)| *idx);
+    Ok(panes.into_iter().map(|(_, pid)| pid).collect())
 }
 
 fn setup_dev_pane(pane: &str, index: usize, env_cmd: &str, editor_cmd: &str) -> Result<(), String> {
@@ -949,6 +990,16 @@ fn run_agent_workspace(
         .then_some(())
         .ok_or_else(|| "failed to start tmux session".to_string())?;
 
+    if layout_idx == 1 {
+        tmux(&[
+            "set-window-option",
+            "-t",
+            &format!("{name}:1"),
+            "@swarm_panes",
+            "true",
+        ])?;
+    }
+
     let guard = SessionGuard::new(&name);
     let base_pane = format!("{name}:1.1");
 
@@ -978,13 +1029,6 @@ fn run_agent_workspace(
                 setup_dev_pane(&format!("{name}:1.3"), 2, &cfg.env_cmd, "")?;
             }
             1 => {
-                tmux(&[
-                    "set-window-option",
-                    "-t",
-                    &format!("{name}:1"),
-                    "@swarm_panes",
-                    "true",
-                ])?;
                 tmux(&["split-window", "-h", "-c", &wd, "-t", &format!("{name}:1")])?;
                 tmux(&[
                     "split-window",
@@ -1002,8 +1046,12 @@ fn run_agent_workspace(
                     "-t",
                     &format!("{name}:1.3"),
                 ])?;
-                for i in 1..=4 {
-                    setup_swarm_pane(&format!("{name}:1.{i}"), (i - 1) as usize, &cfg.env_cmd)?;
+                let panes = list_window_pane_ids(&name, 1)?;
+                if panes.len() < 4 {
+                    return Err("swarm layout did not create four panes".to_string());
+                }
+                for (i, pane) in panes.iter().take(4).enumerate() {
+                    setup_swarm_pane(pane, i, &cfg.env_cmd)?;
                 }
             }
             2 => {
