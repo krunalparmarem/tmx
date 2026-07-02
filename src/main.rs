@@ -1115,6 +1115,102 @@ fn run_kill(session: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Substrings (lowercase) that suggest an AI agent or CLI is waiting for user input.
+const INPUT_WAIT_MARKERS: &[&str] = &[
+    "waiting for your",
+    "waiting for input",
+    "requires input",
+    "requires your",
+    "needs input",
+    "needs your",
+    "add a follow-up",
+    "press enter",
+    "press return",
+    "(y/n)",
+    "[y/n]",
+    "[Y/n]",
+    "(yes/no)",
+    "enter your",
+    "select an option",
+    "choose an option",
+    "what would you like",
+    "run this command",
+    "allow claude",
+    "allow cursor",
+    "approve this",
+    "confirm this",
+    "proceed with",
+    "continue?",
+    "proceed?",
+    "approve?",
+    "allow?",
+];
+
+const INPUT_IDLE_COMMANDS: &[&str] = &["htop", "top", "man", "less", "more"];
+
+fn line_looks_like_input_prompt(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    if INPUT_WAIT_MARKERS.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    if trimmed.ends_with('?') && trimmed.len() > 3 {
+        return true;
+    }
+    // Standalone chevron prompts (not UI arrows like "→ Add a follow-up")
+    if (trimmed.ends_with('>') || trimmed.ends_with('❯'))
+        && !trimmed.starts_with('→')
+        && !trimmed.starts_with("->")
+    {
+        return true;
+    }
+    trimmed.ends_with('➜')
+}
+
+fn pane_requires_input(
+    logs: &str,
+    input_enabled: bool,
+    cursor_y: usize,
+    pane_height: usize,
+    current_command: &str,
+) -> bool {
+    if !input_enabled {
+        return false;
+    }
+    if INPUT_IDLE_COMMANDS
+        .iter()
+        .any(|cmd| current_command.eq_ignore_ascii_case(cmd))
+    {
+        return false;
+    }
+
+    let lines: Vec<&str> = logs.lines().collect();
+    if lines.is_empty() {
+        return false;
+    }
+
+    // Agent prompts (e.g. Cursor's "Add a follow-up") often sit above the status bar,
+    // so scan the full visible capture rather than only the tail.
+    if lines.iter().any(|line| line_looks_like_input_prompt(line)) {
+        return true;
+    }
+
+    let at_input_row = cursor_y + 1 >= pane_height.saturating_sub(1);
+    if !at_input_row {
+        return false;
+    }
+
+    let last = lines.last().copied().unwrap_or("").trim();
+    if last.is_empty() && lines.len() >= 2 {
+        return line_looks_like_input_prompt(lines[lines.len() - 2]);
+    }
+
+    line_looks_like_input_prompt(last)
+}
+
 fn cleanup_worktrees(repo: &Path, created: &[(PathBuf, String)]) {
     for (path, branch) in created {
         let _ = git::worktree_remove(repo, path);
@@ -1798,6 +1894,17 @@ fn classify_agent(prev_tail: &[String], current_tail: &[String]) -> AgentState {
     }
 }
 
+struct DashboardPane {
+    session: String,
+    window: String,
+    pane_idx: String,
+    pane_title: String,
+    cmd: String,
+    pane_id: String,
+    logs: String,
+    input_waiting: bool,
+}
+
 fn run_ps_with_options(
     prev_logs: &mut HashMap<String, Vec<String>>,
     frame: usize,
@@ -1809,7 +1916,10 @@ fn run_ps_with_options(
         "list-panes",
         "-a",
         "-F",
-        "#{session_name}|#{window_name}|#{pane_index}|#{pane_title}|#{pane_current_command}|#{pane_id}",
+        concat!(
+            "#{session_name}|#{window_name}|#{pane_index}|#{pane_title}|#{pane_current_command}|#{pane_id}|",
+            "#{?pane_input_off,0,1}|#{cursor_y}|#{pane_height}"
+        ),
     ])?;
 
     if stdout.trim().is_empty() {
@@ -1819,35 +1929,66 @@ fn run_ps_with_options(
 
     let mut sessions = HashSet::new();
     let mut pane_count = 0usize;
-
-    print_dashboard_header();
-    if show_stats {
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() == 6 {
-                sessions.insert(parts[0].to_string());
-                pane_count += 1;
-            }
-        }
-        print_dashboard_stats(sessions.len(), pane_count);
-    }
-    println!();
+    let mut panes = Vec::new();
 
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() != 6 {
+        if parts.len() != 9 {
             continue;
         }
-        let (session, window, pane_idx, pane_title, cmd, pane_id) =
-            (parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
+        let (session, window, pane_idx, pane_title, cmd, pane_id, input_on, cursor_y, pane_height) = (
+            parts[0],
+            parts[1],
+            parts[2],
+            parts[3],
+            parts[4],
+            parts[5],
+            parts[6] == "1",
+            parts[7].parse().unwrap_or(0),
+            parts[8].parse().unwrap_or(0),
+        );
+
+        sessions.insert(session.to_string());
+        pane_count += 1;
 
         let cap_out = tmux_output(&["capture-pane", "-p", "-t", pane_id])?;
         let logs = cap_out.trim_end().to_string();
+        let input_waiting =
+            pane_requires_input(&logs, input_on, cursor_y, pane_height, cmd);
 
-        let current_tail: Vec<String> = if logs.is_empty() {
+        panes.push(DashboardPane {
+            session: session.to_string(),
+            window: window.to_string(),
+            pane_idx: pane_idx.to_string(),
+            pane_title: pane_title.to_string(),
+            cmd: cmd.to_string(),
+            pane_id: pane_id.to_string(),
+            logs,
+            input_waiting,
+        });
+    }
+
+    let waiting_count = panes.iter().filter(|p| p.input_waiting).count();
+
+    print_dashboard_header();
+    if show_stats {
+        print_dashboard_stats(sessions.len(), pane_count);
+    }
+    if waiting_count > 0 {
+        let label = if waiting_count == 1 {
+            "pane needs input"
+        } else {
+            "panes need input"
+        };
+        warn(&format!("🔔 {waiting_count} {label} — attach to respond"));
+    }
+    println!();
+
+    for pane in panes {
+        let current_tail: Vec<String> = if pane.logs.is_empty() {
             vec![]
         } else {
-            let lines: Vec<&str> = logs.lines().collect();
+            let lines: Vec<&str> = pane.logs.lines().collect();
             let tail_start = lines.len().saturating_sub(3);
             lines[tail_start..]
                 .iter()
@@ -1860,30 +2001,43 @@ fn run_ps_with_options(
                 })
                 .collect()
         };
-        let prev_tail = prev_logs.get(pane_id).cloned().unwrap_or_default();
+        let prev_tail = prev_logs.get(&pane.pane_id).cloned().unwrap_or_default();
 
         let status = if highlight_diff {
-            let s = classify_agent(&prev_tail, &current_tail);
+            let mut s = classify_agent(&prev_tail, &current_tail);
+            if pane.input_waiting {
+                s = AgentState::NeedsInput;
+            }
             if let Some(map) = statuses.as_deref_mut() {
-                map.insert(pane_id.to_string(), s);
+                map.insert(pane.pane_id.clone(), s);
             }
             Some(s)
+        } else if pane.input_waiting {
+            Some(AgentState::NeedsInput)
         } else {
             None
         };
 
-        pane_card(session, window, pane_idx, pane_title, cmd, status);
+        pane_card(
+            &pane.session,
+            &pane.window,
+            &pane.pane_idx,
+            &pane.pane_title,
+            &pane.cmd,
+            status,
+        );
         if current_tail.is_empty() {
             pane_log_line_styled("(no output yet)", false);
         } else {
             for (i, log_line) in current_tail.iter().enumerate() {
-                let changed = highlight_diff
-                    && prev_tail.get(i).map(String::as_str) != Some(log_line.as_str());
+                let changed = pane.input_waiting
+                    || (highlight_diff
+                        && prev_tail.get(i).map(String::as_str) != Some(log_line.as_str()));
                 pane_log_line_styled(log_line, changed);
             }
         }
         if highlight_diff {
-            prev_logs.insert(pane_id.to_string(), current_tail);
+            prev_logs.insert(pane.pane_id.clone(), current_tail);
         }
         pane_card_end();
         println!();
@@ -2208,5 +2362,46 @@ fn main() {
 
     if let Err(msg) = result {
         die(&msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_question_prompt_at_bottom() {
+        let logs = "Working...\nDo you want to proceed? (y/n)\n";
+        assert!(pane_requires_input(logs, true, 2, 3, "node"));
+    }
+
+    #[test]
+    fn detects_follow_up_prompt() {
+        let logs = "Task complete.\nAdd a follow-up\n";
+        assert!(pane_requires_input(logs, true, 1, 2, "bash"));
+    }
+
+    #[test]
+    fn ignores_locked_pane() {
+        let logs = "Do you want to proceed? (y/n)\n";
+        assert!(!pane_requires_input(logs, false, 1, 2, "bash"));
+    }
+
+    #[test]
+    fn ignores_htop() {
+        let logs = "Press F1 for help\n";
+        assert!(!pane_requires_input(logs, true, 0, 24, "htop"));
+    }
+
+    #[test]
+    fn detects_cursor_follow_up_above_status_bar() {
+        let logs = "  → Add a follow-up\n\n  Composer 2.5 Fast · 24%\n  ~/Projects/foo\n";
+        assert!(pane_requires_input(logs, true, 3, 4, "bash"));
+    }
+
+    #[test]
+    fn detects_chevron_prompt() {
+        let logs = "Ready.\n❯ ";
+        assert!(pane_requires_input(logs, true, 1, 2, "bash"));
     }
 }
