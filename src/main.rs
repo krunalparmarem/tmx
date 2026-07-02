@@ -133,11 +133,11 @@ enum Commands {
     Cheat,
 }
 
-struct CursorGuard;
+struct MonitorGuard;
 
-impl Drop for CursorGuard {
+impl Drop for MonitorGuard {
     fn drop(&mut self) {
-        let _ = write!(io::stdout(), "\x1B[?25h");
+        let _ = write!(io::stdout(), "\x1B[?1049l\x1B[?25h");
     }
 }
 
@@ -2088,8 +2088,8 @@ fn set_swarm_badge(statuses: &HashMap<String, AgentState>) {
 }
 
 fn run_monitor() -> Result<(), String> {
-    let _guard = CursorGuard;
-    let _ = write!(io::stdout(), "\x1B[?25l");
+    let _guard = MonitorGuard;
+    let _ = write!(io::stdout(), "\x1B[?1049h\x1B[?25l");
     let mut prev_logs = HashMap::new();
     let mut prev_status: HashMap<String, AgentState> = HashMap::new();
     let mut frame = 0usize;
