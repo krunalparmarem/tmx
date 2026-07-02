@@ -552,7 +552,7 @@ pub fn cheat_section(title: &str) {
 }
 
 /// Live status of an agent pane, inferred from its output in `tmx monitor`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentState {
     Working,
     Idle,

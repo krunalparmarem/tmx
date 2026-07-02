@@ -1121,7 +1121,6 @@ const INPUT_WAIT_MARKERS: &[&str] = &[
     "waiting for input",
     "requires input",
     "requires your",
-    "needs input",
     "needs your",
     "add a follow-up",
     "press enter",
@@ -1134,12 +1133,8 @@ const INPUT_WAIT_MARKERS: &[&str] = &[
     "select an option",
     "choose an option",
     "what would you like",
-    "run this command",
     "allow claude",
     "allow cursor",
-    "approve this",
-    "confirm this",
-    "proceed with",
     "continue?",
     "proceed?",
     "approve?",
@@ -1148,9 +1143,27 @@ const INPUT_WAIT_MARKERS: &[&str] = &[
 
 const INPUT_IDLE_COMMANDS: &[&str] = &["htop", "top", "man", "less", "more"];
 
-fn line_looks_like_input_prompt(line: &str) -> bool {
+/// Lines near the bottom of a pane capture — enough for Cursor's follow-up above the status bar.
+const INPUT_PROMPT_SCAN_LINES: usize = 8;
+
+fn line_looks_like_ui_chrome(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.starts_with('~')
+        || (trimmed.starts_with('/') && !trimmed.contains('?'))
+    {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    (lower.contains("composer") || lower.contains("claude") || lower.contains("cursor"))
+        && (trimmed.contains('·') || trimmed.contains('%'))
+}
+
+fn line_looks_like_input_prompt(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || line_looks_like_ui_chrome(line) {
         return false;
     }
     let lower = trimmed.to_lowercase();
@@ -1158,14 +1171,29 @@ fn line_looks_like_input_prompt(line: &str) -> bool {
         return true;
     }
     if trimmed.ends_with('?') && trimmed.len() > 3 {
-        return true;
+        if lower.contains("do you")
+            || lower.contains("would you")
+            || lower.contains("what would you")
+            || lower.contains("(y/n)")
+            || lower.contains("[y/n]")
+            || lower.contains("yes/no")
+            || lower.contains("press")
+            || lower.contains("allow")
+            || lower.contains("confirm")
+            || lower.contains("approve")
+            || (trimmed.len() < 40
+                && (lower.contains("continue") || lower.contains("proceed")))
+        {
+            return true;
+        }
     }
     // Standalone chevron prompts (not UI arrows like "→ Add a follow-up")
-    if (trimmed.ends_with('>') || trimmed.ends_with('❯'))
-        && !trimmed.starts_with('→')
-        && !trimmed.starts_with("->")
+    if trimmed.ends_with('❯')
+        || (trimmed.ends_with('>') && trimmed.len() < 24 && !trimmed.ends_with("=>"))
     {
-        return true;
+        if !trimmed.starts_with('→') && !trimmed.starts_with("->") {
+            return true;
+        }
     }
     trimmed.ends_with('➜')
 }
@@ -1192,9 +1220,13 @@ fn pane_requires_input(
         return false;
     }
 
-    // Agent prompts (e.g. Cursor's "Add a follow-up") often sit above the status bar,
-    // so scan the full visible capture rather than only the tail.
-    if lines.iter().any(|line| line_looks_like_input_prompt(line)) {
+    // Agent prompts (e.g. Cursor's "Add a follow-up") sit just above the status bar —
+    // scan only the bottom of the capture so working scrollback doesn't false-positive.
+    let scan_start = lines.len().saturating_sub(INPUT_PROMPT_SCAN_LINES);
+    if lines[scan_start..]
+        .iter()
+        .any(|line| line_looks_like_input_prompt(line))
+    {
         return true;
     }
 
@@ -1853,6 +1885,9 @@ fn run_doctor(cfg: &AppConfig) -> Result<(), String> {
 /// Infer an agent's live status from how its output changed between refreshes.
 fn classify_agent(prev_tail: &[String], current_tail: &[String]) -> AgentState {
     let changed = prev_tail != current_tail;
+    if changed {
+        return AgentState::Working;
+    }
     let last = current_tail
         .iter()
         .rev()
@@ -1860,27 +1895,7 @@ fn classify_agent(prev_tail: &[String], current_tail: &[String]) -> AgentState {
         .cloned()
         .unwrap_or_default();
     let l = last.trim();
-    let low = l.to_lowercase();
-    let needs_input = low.ends_with('?')
-        || low.contains("(y/n)")
-        || low.contains("[y/n]")
-        || low.contains("y/n/a")
-        || low.contains("yes/no")
-        || low.contains("continue?")
-        || low.contains("proceed")
-        || low.contains("overwrite")
-        || low.contains("password")
-        || low.contains("do you want")
-        || low.contains("(press");
-
-    if changed {
-        return if needs_input {
-            AgentState::NeedsInput
-        } else {
-            AgentState::Working
-        };
-    }
-    if needs_input {
+    if line_looks_like_input_prompt(l) {
         return AgentState::NeedsInput;
     }
     let at_prompt = l.ends_with('$')
@@ -2002,10 +2017,12 @@ fn run_ps_with_options(
                 .collect()
         };
         let prev_tail = prev_logs.get(&pane.pane_id).cloned().unwrap_or_default();
+        let output_changed = prev_tail != current_tail;
 
         let status = if highlight_diff {
             let mut s = classify_agent(&prev_tail, &current_tail);
-            if pane.input_waiting {
+            // Stable output + prompt heuristics means the agent is blocked on you, not working.
+            if pane.input_waiting && !output_changed {
                 s = AgentState::NeedsInput;
             }
             if let Some(map) = statuses.as_deref_mut() {
@@ -2403,5 +2420,45 @@ mod tests {
     fn detects_chevron_prompt() {
         let logs = "Ready.\n❯ ";
         assert!(pane_requires_input(logs, true, 1, 2, "bash"));
+    }
+
+    #[test]
+    fn ignores_working_agent_streaming_output() {
+        let logs = concat!(
+            "Reading src/main.rs...\n",
+            "I'll proceed with updating the handler.\n",
+            "Should we refactor this module for clarity?\n",
+            "  Composer 2.5 Fast · 67%\n",
+            "  ~/Projects/foo\n",
+        );
+        assert!(!pane_requires_input(logs, true, 3, 4, "bash"));
+    }
+
+    #[test]
+    fn classify_working_when_output_changes() {
+        let prev = vec!["Working...".to_string()];
+        let current = vec!["Working...".to_string(), "Do you want to proceed? (y/n)".to_string()];
+        assert_eq!(
+            classify_agent(&prev, &current),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn classify_needs_input_when_output_stable() {
+        let tail = vec!["Do you want to proceed? (y/n)".to_string()];
+        assert_eq!(classify_agent(&tail, &tail), AgentState::NeedsInput);
+    }
+
+    #[test]
+    fn ignores_old_prompt_in_scrollback() {
+        let logs = concat!(
+            "Add a follow-up\n",
+            "Line 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\n",
+            "Still working on the task...\n",
+            "  Composer 2.5 Fast · 42%\n",
+            "  ~/Projects/foo\n",
+        );
+        assert!(!pane_requires_input(logs, true, 3, 4, "bash"));
     }
 }
