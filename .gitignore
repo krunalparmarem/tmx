@@ -28,3 +28,4 @@ target/
 tmx_crash.log
 agent-pane-*.log
 
+.tmx-trees/
