@@ -1,8 +1,12 @@
-# 🚀 TMX 10x - The Ultimate Agentic Workspace
+# TMX 10x
 
-`tmx` is a blazing-fast, Rust-based CLI wrapper around `tmux` designed specifically for **AI Developers** and **Multi-Agent Orchestration**.
+**A Rust CLI that turns tmux into an agentic workspace for AI development.**
 
 Managing multiple autonomous AI agents (like Claude Code, Codex, Aider) in the terminal often leads to "terminal sprawl", lost scrollback logs, and — worst of all — agents **clobbering each other's files** when you run them in parallel. `tmx` solves all of this by automatically configuring `tmux` with powerful features tailored for AI development—without modifying your global `~/.tmux.conf`.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org/)
+[![tmux](https://img.shields.io/badge/requires-tmux-green.svg)](https://github.com/tmux/tmux)
 
 ## 🐝 The hero feature: Parallel Agent Swarm
 
@@ -14,6 +18,64 @@ tmx swarm "add a dark mode toggle"
 `tmx swarm` spawns **N AI agents in parallel, each in its own isolated git worktree + branch**, so they never step on each other. When they're done, `tmx review` shows you a plain-language diff of what each agent did and lets you **keep the best one** (it merges the branch) and discard the rest — no git knowledge required.
 
 > Try three approaches at once. Keep the one you like. Throw away the rest with one keypress.
+
+---
+
+## Table of contents
+
+- [Why TMX?](#why-tmx)
+- [Features](#-features)
+- [Parallel Agent Swarm](#-parallel-agent-swarm-worktree-isolation)
+- [Workspace layouts](#-workspace-layouts)
+- [Magical UX](#-magical-ux)
+- [Installation](#-installation)
+- [Quick start](#-quick-start)
+- [CLI reference](#-cli-commands)
+- [Keyboard shortcuts](#-power-shortcuts)
+- [Configuration](#-configuration)
+- [Platform notes](#platform-notes)
+- [Development](#development)
+- [Contributing](#-contributing)
+- [License](#-license)
+
+---
+
+## Why TMX?
+
+Working with autonomous AI agents in the terminal creates predictable pain:
+
+| Problem | TMX solution |
+| --- | --- |
+| Too many terminals and lost context | Named workspaces with preset multi-pane layouts |
+| Agents overwrite each other's files | `tmx swarm` isolates each agent in its own git worktree + branch |
+| Agent output scrolls away forever | Yank scrollback, auto-log to disk, one-click crash reports |
+| Accidental keystrokes interrupt agents | Per-pane lock mode |
+| Hard to monitor many agents at once | `tmx ps` dashboard, live `tmx monitor`, and input-wait badges |
+| tmux config is intimidating | Zero-touch setup—config lives in `~/.config/tmx`, not your global tmux |
+
+TMX never modifies `~/.tmux.conf`. It generates a dedicated config and passes it to tmux with `-f`.
+
+```mermaid
+flowchart LR
+    subgraph cli [TMX CLI]
+        A[tmx swarm / tmx agent]
+    end
+    subgraph config [~/.config/tmx]
+        B[config.json]
+        C[tmx.conf]
+    end
+    subgraph tmux [tmux session]
+        D[Editor pane]
+        E[Agent / shell panes]
+        F[Optional monitor pane]
+    end
+    A --> B
+    B --> C
+    C --> tmux
+    tmux --> D
+    tmux --> E
+    tmux --> F
+```
 
 ## ✨ Features
 
@@ -356,12 +418,52 @@ The yank shortcut (`Prefix + y`) requires a clipboard tool:
 | `.tmx-trees/<session>/` | `tmx swarm` — per-agent git worktrees (git-ignored; cleaned up by `tmx review`) |
 | `~/.config/tmx/state.json` | Tracks active swarms so `tmx review` can find them |
 
+## Platform notes
+
+### Clipboard (yank shortcut)
+
+| Platform | Tool |
+| --- | --- |
+| macOS | `pbcopy` *(built-in)* |
+| Linux (Wayland) | `wl-copy` |
+| Linux (X11) | `xclip` |
+
+Install the appropriate tool if `Prefix + y` does not copy to your clipboard.
+
+### macOS: Option as Meta
+
+Instant pane switching with `Option + arrows` requires your terminal to send Option as Meta (e.g. **Use Option as Meta key** in iTerm2, or equivalent in your terminal emulator).
+
+### Infinite scrollback
+
+TMX sets tmux history to 100,000 lines so long agent runs stay searchable.
+
+## Development
+
+```bash
+git clone https://github.com/krunalparmarem/tmx.git
+cd tmx
+
+cargo check    # compile check
+cargo test     # unit tests
+cargo fmt      # format
+cargo clippy   # lint
+cargo run --   # run locally (pass subcommands after --)
+```
+
+When adding new prefix shortcuts, update `src/tmx.conf`, the `tmx cheat` output in `src/main.rs`, and the [keyboard shortcuts](#-power-shortcuts) section here.
+
 ## 🤝 Contributing
 
-Pull requests are welcome! If you have ideas for new Agentic features, please open an issue!
+Issues and pull requests are welcome—especially ideas for agentic workflows (log preservation, multi-agent monitoring, isolation).
+
+1. Fork the repo
+2. Create a feature branch
+3. Ensure `cargo check`, `cargo test`, `cargo fmt`, and `cargo clippy` pass
+4. Open a PR with a clear description of the change
 
 When contributing, update documentation alongside code changes — see `.agents/AGENTS.md`.
 
 ## 📄 License
 
-MIT License
+[MIT](LICENSE) © 2026 [krunalparmarem](https://github.com/krunalparmarem)
